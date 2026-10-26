@@ -84,14 +84,18 @@ const errorPayload = (message, type, code) => ({
   error: { message, type, ...(code ? { code } : {}) },
 })
 
-// 与 Node 版 authenticate 等价：authorization 优先，回退 x-api-key；
-// 带不带 "Bearer " 前缀都接受，比较的是去掉前缀后的原始 token。
-function authorized(req) {
-  const key = process.env.API_KEY
-  if (!key) return true
+// 与 Go HTTP 入口一致：Authorization 优先，回退 X-API-Key。
+// 只解析本次请求的凭据，不再与环境变量 API_KEY 比较或回退 public。
+function requestAPIKey(req) {
   const header = req.headers.authorization || req.headers["x-api-key"] || ""
-  const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : header.trim()
-  return token === key
+  if (typeof header !== "string") return ""
+  let token = header.trim()
+  const parts = token.split(/\s+/)
+  if (parts[0].toLowerCase() === "bearer") {
+    if (parts.length !== 2) return ""
+    token = parts[1]
+  }
+  return /^[\x21-\x7e]+$/.test(token) ? token : ""
 }
 
 function readBody(req) {
@@ -131,11 +135,12 @@ export default async function handler(req, res) {
     return sendJson(res, 404, errorPayload("Not found", "invalid_request_error"))
   }
 
-  if (!authorized(req)) {
-    return sendJson(res, 401, errorPayload("Invalid API key", "authentication_error"))
+  const apiKey = requestAPIKey(req)
+  if (!apiKey) {
+    return sendJson(res, 401, errorPayload("A valid OpenCode API key is required", "authentication_error"))
   }
 
-  if (path === "/v1/models" || path === "/models") return rpcJson(req, res, "models", {})
+  if (path === "/v1/models" || path === "/models") return rpcJson(req, res, "models", { apiKey })
 
   const raw = await readBody(req)
   let payload
@@ -145,12 +150,12 @@ export default async function handler(req, res) {
     return sendJson(res, 400, errorPayload("Invalid JSON body", "invalid_request_error"))
   }
   if (payload?.stream !== true) {
-    return rpcJson(req, res, "chat", { body: payload, stream: false })
+    return rpcJson(req, res, "chat", { body: payload, stream: false, apiKey })
   }
 
   // 流式：先等第一条消息，确认不是校验错误再提交 SSE 响应头。
   let started = false
-  const outcome = await rpcCall("chat", { body: payload, stream: true }, (data) => {
+  const outcome = await rpcCall("chat", { body: payload, stream: true, apiKey }, (data) => {
     if (!started) {
       res.writeHead(200, {
         ...CORS,

@@ -375,7 +375,7 @@ func ErrorBody(status int, message string) map[string]any {
 	switch {
 	case status == http.StatusTooManyRequests:
 		return map[string]any{"error": map[string]any{
-			"message": text + " (free model rate limit)", "type": "rate_limit_error", "code": "rate_limit_exceeded",
+			"message": text, "type": "rate_limit_error", "code": "rate_limit_exceeded",
 		}}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return map[string]any{"error": map[string]any{

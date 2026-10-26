@@ -76,8 +76,25 @@ func (h *Handler) Handle(ctx context.Context, raw []byte, emit emitter) {
 			"endpoints": endpointList,
 		})
 	case "models":
-		list, err := h.client.Models(ctx)
+		var params credentialParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			emitError(emit, req.ID, -32602, "invalid params")
+			return
+		}
+		if !requireAPIKey(params.APIKey, req.ID, emit) {
+			return
+		}
+		list, err := h.client.Models(ctx, params.APIKey)
 		if err != nil {
+			var upstream *zen.UpstreamError
+			if errors.As(err, &upstream) {
+				emitResult(emit, req.ID, map[string]any{
+					"status":     upstream.Status,
+					"retryAfter": upstream.RetryAfter,
+					"error":      protocol.ErrorBody(upstream.Status, string(upstream.Body)),
+				})
+				return
+			}
 			emitError(emit, req.ID, -32000, err.Error())
 			return
 		}
@@ -96,15 +113,35 @@ func (h *Handler) Handle(ctx context.Context, raw []byte, emit emitter) {
 	}
 }
 
+type credentialParams struct {
+	APIKey string `json:"apiKey"`
+}
+
 type chatParams struct {
+	credentialParams
 	Body   json.RawMessage `json:"body"`
 	Stream bool            `json:"stream"`
+}
+
+// requireAPIKey 同时保护直接 RPC 调用，不能依赖 Node 入口已检查凭据。
+func requireAPIKey(apiKey string, id any, emit emitter) bool {
+	if zen.ValidAPIKey(apiKey) {
+		return true
+	}
+	emitResult(emit, id, map[string]any{
+		"status": http.StatusUnauthorized,
+		"error":  protocol.ErrorBody(http.StatusUnauthorized, "A valid OpenCode API key is required"),
+	})
+	return false
 }
 
 func (h *Handler) handleChat(ctx context.Context, req request, emit emitter) {
 	var params chatParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		emitError(emit, req.ID, -32602, "invalid params")
+		return
+	}
+	if !requireAPIKey(params.APIKey, req.ID, emit) {
 		return
 	}
 	var payload map[string]any
@@ -122,7 +159,7 @@ func (h *Handler) handleChat(ctx context.Context, req request, emit emitter) {
 	}
 
 	if !params.Stream {
-		result, err := h.chat.Complete(ctx, payload, model)
+		result, err := h.chat.Complete(ctx, payload, model, params.APIKey)
 		if err != nil {
 			var upstream *chat.UpstreamError
 			if errors.As(err, &upstream) {
@@ -140,7 +177,7 @@ func (h *Handler) handleChat(ctx context.Context, req request, emit emitter) {
 		return
 	}
 
-	resp, renames, err := h.chat.Upstream(ctx, payload, model)
+	resp, renames, err := h.chat.Upstream(ctx, payload, model, params.APIKey)
 	if err != nil {
 		emitError(emit, req.ID, -32000, err.Error())
 		return

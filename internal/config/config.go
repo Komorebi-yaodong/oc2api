@@ -28,8 +28,6 @@ const (
 
 // Config 是启动时定下来的配置快照，运行期不再变化。
 type Config struct {
-	// APIKey 留空表示匿名访问。
-	APIKey string
 	// Debug 只有字面量 "true" 才开启（"false" 在 Go 里也不是 true，但仍然显式比较更清楚）。
 	Debug bool
 	// Port 是 HTTP 监听端口，非法值回落 8080。
@@ -51,7 +49,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return Config{
-		APIKey:            strings.TrimSpace(os.Getenv("API_KEY")),
 		Debug:             os.Getenv("DEBUG") == "true",
 		Port:              loadPort(),
 		ZenAPIBaseURL:     base,

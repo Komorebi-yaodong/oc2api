@@ -26,12 +26,12 @@ func New(cfg config.Config, client *zen.Client) *Service {
 }
 
 // Upstream 发起一次上游对话请求（上游只接受流式，非流式由调用方聚合）。
-func (s *Service) Upstream(ctx context.Context, payload map[string]any, model string) (*http.Response, *shape.Renames, error) {
-	return s.UpstreamWithSession(ctx, payload, model, zen.SessionID())
+func (s *Service) Upstream(ctx context.Context, payload map[string]any, model, apiKey string) (*http.Response, *shape.Renames, error) {
+	return s.UpstreamWithSession(ctx, payload, model, zen.SessionID(), apiKey)
 }
 
 // UpstreamWithSession 允许复用会话 id，多轮对话可以命中上游 prompt 缓存。
-func (s *Service) UpstreamWithSession(ctx context.Context, payload map[string]any, model, session string) (*http.Response, *shape.Renames, error) {
+func (s *Service) UpstreamWithSession(ctx context.Context, payload map[string]any, model, session, apiKey string) (*http.Response, *shape.Renames, error) {
 	body, renames, err := shape.Build(payload, model)
 	if err != nil {
 		return nil, nil, err
@@ -39,7 +39,7 @@ func (s *Service) UpstreamWithSession(ctx context.Context, payload map[string]an
 	if s.debug {
 		log.Printf("[chat] model=%s session=%s%s tools=%d body=%dB", model, session, describeMessages(payload), countClientTools(payload), len(body))
 	}
-	resp, err := s.client.Chat(ctx, body, session)
+	resp, err := s.client.Chat(ctx, body, session, apiKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -74,9 +74,6 @@ func Validate(payload map[string]any) (model string, reason string) {
 	if strings.TrimSpace(model) == "" {
 		return "", "model must be a non-empty string"
 	}
-	if model != "big-pickle" && !strings.HasSuffix(model, "-free") {
-		return "", "Only big-pickle and models ending in -free are allowed"
-	}
 	messages, _ := payload["messages"].([]any)
 	if len(messages) == 0 {
 		return "", "messages must be a non-empty array"
@@ -89,8 +86,8 @@ func Validate(payload map[string]any) (model string, reason string) {
 const noToolRetry = "（本客户端没有可用的工具，请直接用文字回答，不要调用任何工具。）"
 
 // Complete 返回聚合后的非流式响应。
-func (s *Service) Complete(ctx context.Context, payload map[string]any, model string) (map[string]any, error) {
-	resp, renames, err := s.Upstream(ctx, payload, model)
+func (s *Service) Complete(ctx context.Context, payload map[string]any, model, apiKey string) (map[string]any, error) {
+	resp, renames, err := s.Upstream(ctx, payload, model, apiKey)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +105,7 @@ func (s *Service) Complete(ctx context.Context, payload map[string]any, model st
 	}
 
 	retryPayload := withNudge(payload)
-	resp2, renames2, err := s.Upstream(ctx, retryPayload, model)
+	resp2, renames2, err := s.Upstream(ctx, retryPayload, model, apiKey)
 	if err != nil {
 		return result, nil
 	}
@@ -123,14 +120,8 @@ func (s *Service) Complete(ctx context.Context, payload map[string]any, model st
 	return retried, nil
 }
 
-// UpstreamError 保留上游状态码，供 HTTP/RPC 层原样透出。
-type UpstreamError struct {
-	Status     int
-	RetryAfter string
-	Body       []byte
-}
-
-func (e *UpstreamError) Error() string { return string(e.Body) }
+// UpstreamError 与模型列表共用同一种上游错误，供 HTTP/RPC 层原样透出。
+type UpstreamError = zen.UpstreamError
 
 func hasContent(result map[string]any) bool {
 	choices, _ := result["choices"].([]any)

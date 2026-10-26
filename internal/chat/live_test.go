@@ -20,12 +20,17 @@ import (
 //
 //	go test ./internal/chat -run TestLiveStreamWithToolThenFollowUp -v
 //
-// 需要真实上游额度，默认跳过；设置 OC2API_LIVE_TEST=1 才跑。
+// 需要真实上游额度，默认跳过；设置 OC2API_LIVE_TEST=1 并通过
+// OC2API_LIVE_API_KEY 提供调用方 OpenCode Key 才跑。
 func TestLiveStreamWithToolThenFollowUp(t *testing.T) {
 	if os.Getenv("OC2API_LIVE_TEST") != "1" {
 		t.Skip("需要真实上游额度：OC2API_LIVE_TEST=1 go test ./internal/chat -run Live -v")
 	}
 
+	apiKey := os.Getenv("OC2API_LIVE_API_KEY")
+	if !zen.ValidAPIKey(apiKey) {
+		t.Fatal("真实冒烟需通过 OC2API_LIVE_API_KEY 提供 OpenCode Key")
+	}
 	const model = "deepseek-v4.1-flash-free"
 	session := zen.SessionID()
 	service := newLiveService(t)
@@ -44,7 +49,7 @@ func TestLiveStreamWithToolThenFollowUp(t *testing.T) {
 		"messages": []any{map[string]any{"role": "user", "content": "用 get_weather 查一下北京天气，然后告诉我。"}},
 		"tools":    []any{weather},
 	}
-	text := streamOnce(t, service, model, session, first, 150*time.Second)
+	text := streamOnce(t, service, model, session, apiKey, first, 150*time.Second)
 
 	second := map[string]any{
 		"model": model,
@@ -55,7 +60,7 @@ func TestLiveStreamWithToolThenFollowUp(t *testing.T) {
 		},
 		"tools": []any{weather},
 	}
-	streamOnce(t, service, model, session, second, 150*time.Second)
+	streamOnce(t, service, model, session, apiKey, second, 150*time.Second)
 }
 
 // newLiveService 用真实环境变量组装对话服务（默认上游、默认超时）。
@@ -69,12 +74,12 @@ func newLiveService(t *testing.T) *Service {
 }
 
 // streamOnce 发一次流式请求，返回正文（可能为空），并断言流里有 [DONE]。
-func streamOnce(t *testing.T, service *Service, model, session string, payload map[string]any, timeout time.Duration) string {
+func streamOnce(t *testing.T, service *Service, model, session, apiKey string, payload map[string]any, timeout time.Duration) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	resp, renames, err := service.UpstreamWithSession(ctx, payload, model, session)
+	resp, renames, err := service.UpstreamWithSession(ctx, payload, model, session, apiKey)
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}

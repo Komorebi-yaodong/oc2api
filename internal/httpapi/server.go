@@ -38,9 +38,9 @@ func writeOpenAIError(w http.ResponseWriter, status int, message, kind, code str
 	writeJSON(w, status, map[string]any{"error": body}, nil)
 }
 
-// New 组装路由：/ 与 /health 公开，其余按 API_KEY 鉴权。
-// 配置与上游客户端都由 main 注入，这里不再读环境变量。
-func New(cfg config.Config, client *zen.Client, chats *chat.Service) http.Handler {
+// New 组装路由：健康检查与 /ip 公开，模型和对话请求必须提供 OpenCode Key。
+// 凭据按请求传递，不保存在共享客户端或服务中。
+func New(client *zen.Client, chats *chat.Service) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -49,17 +49,19 @@ func New(cfg config.Config, client *zen.Client, chats *chat.Service) http.Handle
 		case "/ip":
 			ip(w)
 		case "/v1/models", "/models":
-			if !authorized(cfg, r) {
-				writeOpenAIError(w, http.StatusUnauthorized, "Invalid API key", "authentication_error", "")
+			apiKey := requestAPIKey(r)
+			if apiKey == "" {
+				writeOpenAIError(w, http.StatusUnauthorized, "A valid OpenCode API key is required", "authentication_error", "")
 				return
 			}
-			models(w, r, client)
+			models(w, r, client, apiKey)
 		case "/v1/chat/completions", "/chat/completions":
-			if !authorized(cfg, r) {
-				writeOpenAIError(w, http.StatusUnauthorized, "Invalid API key", "authentication_error", "")
+			apiKey := requestAPIKey(r)
+			if apiKey == "" {
+				writeOpenAIError(w, http.StatusUnauthorized, "A valid OpenCode API key is required", "authentication_error", "")
 				return
 			}
-			completions(w, r, chats)
+			completions(w, r, chats, apiKey)
 		default:
 			writeOpenAIError(w, http.StatusNotFound, "Not found", "invalid_request_error", "")
 		}
@@ -75,26 +77,39 @@ func health(w http.ResponseWriter) {
 	}, nil)
 }
 
-// authorized 与 Node 版 authenticate 等价：authorization 优先，回退 x-api-key；
-// 带不带 "Bearer " 前缀都接受，比较的是去掉前缀后的原始 token。
-func authorized(cfg config.Config, r *http.Request) bool {
-	if cfg.APIKey == "" {
-		return true
-	}
+// requestAPIKey 与 Vercel 薄层一致：Authorization 优先，回退 X-API-Key。
+// 兼容 Bearer 前缀和原始 Key；无效 Authorization 不使用另一个头绕过。
+func requestAPIKey(r *http.Request) string {
 	header := r.Header.Get("Authorization")
 	if header == "" {
 		header = r.Header.Get("X-API-Key")
 	}
 	token := strings.TrimSpace(header)
-	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-		token = strings.TrimSpace(token[7:])
+	parts := strings.Fields(token)
+	if len(parts) > 0 && strings.EqualFold(parts[0], "bearer") {
+		if len(parts) != 2 {
+			return ""
+		}
+		token = parts[1]
 	}
-	return token == cfg.APIKey
+	if !zen.ValidAPIKey(token) {
+		return ""
+	}
+	return token
 }
 
-func models(w http.ResponseWriter, r *http.Request, client *zen.Client) {
-	list, err := client.Models(r.Context())
+func models(w http.ResponseWriter, r *http.Request, client *zen.Client, apiKey string) {
+	list, err := client.Models(r.Context(), apiKey)
 	if err != nil {
+		var upstream *zen.UpstreamError
+		if errors.As(err, &upstream) {
+			headers := map[string]string{}
+			if upstream.RetryAfter != "" {
+				headers["Retry-After"] = upstream.RetryAfter
+			}
+			writeJSON(w, upstream.Status, protocol.ErrorBody(upstream.Status, string(upstream.Body)), headers)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, "Upstream error: "+err.Error(), "upstream_error", "upstream_error")
 		return
 	}
@@ -111,7 +126,7 @@ func ip(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{"ip": found, "source": source}, nil)
 }
 
-func completions(w http.ResponseWriter, r *http.Request, chats *chat.Service) {
+func completions(w http.ResponseWriter, r *http.Request, chats *chat.Service, apiKey string) {
 	if r.Method != http.MethodPost {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "Not found", "invalid_request_error", "")
 		return
@@ -134,7 +149,7 @@ func completions(w http.ResponseWriter, r *http.Request, chats *chat.Service) {
 	stream, _ := payload["stream"].(bool)
 
 	if !stream {
-		result, err := chats.Complete(r.Context(), payload, model)
+		result, err := chats.Complete(r.Context(), payload, model, apiKey)
 		if err != nil {
 			var upstream *chat.UpstreamError
 			if errors.As(err, &upstream) {
@@ -152,7 +167,7 @@ func completions(w http.ResponseWriter, r *http.Request, chats *chat.Service) {
 		return
 	}
 
-	resp, renames, err := chats.Upstream(r.Context(), payload, model)
+	resp, renames, err := chats.Upstream(r.Context(), payload, model, apiKey)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "Upstream error: "+err.Error(), "upstream_error", "upstream_error")
 		return

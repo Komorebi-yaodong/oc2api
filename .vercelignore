@@ -9,3 +9,6 @@ docker/
 bin/
 public/
 **/*_test.go
+api/*.test.mjs
+进度.md
+项目AGENT.md

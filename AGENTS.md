@@ -23,8 +23,9 @@ scripts/build-go.sh Vercel 构建期交叉编译 linux/amd64 到 bin/
 ## 配置怎么传
 
 `internal/config` 是唯一读 `os.Getenv` 的地方（`Load()`，无缓存、无单例）。`main` 启动时
-调一次 `config.Load()`，再把 `config.Config` 注入 `zen.New`、`chat.New`、`httpapi.New`、
-`rpc.New`；其它包不许再自己读环境变量。校验失败直接 `log.Fatalf`，不要静默回落。
+调一次 `config.Load()`，再把 `config.Config` 注入 `zen.New`、`chat.New`、`rpc.New`；
+`httpapi.New` 只接收上游客户端与对话服务。其它包不许再自己读环境变量。
+校验失败直接 `log.Fatalf`，不要静默回落。
 
 `ZEN_API_BASE_URL` 只填**站点根**（默认 `https://opencode.ai`），接口路径写在
 `internal/zen` 的 `chatPath` / `modelsPath` 常量里（`/inference/v1/chat/completions`、
@@ -71,6 +72,15 @@ TLS 握手和等响应头；正文流式读取不设上限。注意：自定义 
 
 请求头里 `x-opencode-project` 用固定哈希即可；`b3` / `traceparent` 不是必需。
 
+## 请求级凭据（BYOK）
+
+- HTTP 与 Vercel Node 入口从 `Authorization` 提取 OpenCode Key（支持 Bearer 或原始 Key），无该头时回退 `X-API-Key`；缺少或格式不合法返回 401。
+- 旧 `API_KEY` 环境变量及本地网关密码校验已移除。没有默认 `public`，也没有服务端上游 Key。
+- Key 经显式参数传入 `chat.Upstream` / `Complete` / `zen.Chat` / `zen.Models`；Vercel 在 RPC `params.apiKey` 中传入。禁止保存到共享 Client、Service、全局状态或日志。
+- 非流式兜底重试必须沿用当前请求的 Key；直接 RPC 也必须校验 Key，不能仅依赖 Node 入口。
+- 对话不限制模型名，模型列表不做免费过滤；权限与费用由 OpenCode 决定。已有 uTLS、system/tools 整形、32000 token 上限保持不变，付费模型真实兼容性需部署验证。
+- 模型列表与对话共用 `zen.UpstreamError`（chat 提供别名），保留上游状态与 Retry-After。
+
 ## 工具整形
 
 1. 客户端声明的工具改名 `oc2api_<sanitized>`（`internal/shape` 的 `ToolPrefix`），
@@ -108,7 +118,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/oc2api
 再用同一段对话追问一轮，两次都 200 且流里有正文和 `[DONE]` 即通过。
 
 ```bash
-OC2API_LIVE_TEST=1 go test ./internal/chat -run Live -v
+OC2API_LIVE_TEST=1 OC2API_LIVE_API_KEY=<your-opencode-key> go test ./internal/chat -run Live -v
 ```
 
 默认跳过，因为消耗免费额度。额度用尽时上游回 429，和“形态不对”的 429 文案相同：
@@ -121,4 +131,4 @@ OC2API_LIVE_TEST=1 go test ./internal/chat -run Live -v
   （`chat.UpstreamWithSession` 已经支持复用，只差按对话做种子 + TTL）。
 - **流式没有空闲超时**：只有建连和响应头超时，上游半死不活时会挂到平台上限。
 - **薄层没有 RPC 超时**：Go 子进程卡住时 Node 会一起等。
-- **测试覆盖**：`internal/httpapi`、`internal/rpc` 和 `api/index.js` 还没有测试。
+- **测试覆盖**：HTTP/RPC/聊天补充 BYOK 回归用例；`node --test api/index.test.mjs` 可单独运行薄层离线测试。Go 用例使用本地 httptest，不消耗真实账号额度。

@@ -7,11 +7,11 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -123,26 +123,55 @@ func newTransport(connectTimeout time.Duration) *http.Transport {
 	}
 }
 
-// Chat 发起一次上游对话请求；上游只接受流式，非流式由调用方聚合。
-func (c *Client) Chat(ctx context.Context, body []byte, session string) (*http.Response, error) {
+// UpstreamError 保留上游状态与响应，供 HTTP/RPC 层原样透出。
+type UpstreamError struct {
+	Status     int
+	RetryAfter string
+	Body       []byte
+}
+
+func (e *UpstreamError) Error() string { return string(e.Body) }
+
+// ValidAPIKey 只检查凭据是否适合放入请求头，不校验格式或账号权限。
+// 禁止空白及控制字符，避免无效请求头的底层错误包含原始 Key。
+func ValidAPIKey(apiKey string) bool {
+	if apiKey == "" {
+		return false
+	}
+	for i := 0; i < len(apiKey); i++ {
+		if apiKey[i] < 0x21 || apiKey[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// Chat 发起一次上游对话请求；凭据只属于本次请求，不写入共享 Client。
+func (c *Client) Chat(ctx context.Context, body []byte, session, apiKey string) (*http.Response, error) {
+	if !ValidAPIKey(apiKey) {
+		return nil, errors.New("a valid OpenCode API key is required")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	for key, value := range UpstreamHeaders(session) {
+	for key, value := range UpstreamHeaders(session, apiKey) {
 		req.Header.Set(key, value)
 	}
 	return c.http.Do(req)
 }
 
-// Models 拉取上游模型列表并只保留免费模型。
-func (c *Client) Models(ctx context.Context) ([]map[string]any, error) {
+// Models 使用调用方凭据拉取全部模型，权限与可用性由上游决定。
+func (c *Client) Models(ctx context.Context, apiKey string) ([]map[string]any, error) {
+	if !ValidAPIKey(apiKey) {
+		return nil, errors.New("a valid OpenCode API key is required")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.modelsURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer public")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("User-Agent", clientUA)
 	res, err := c.http.Do(req)
 	if err != nil {
@@ -150,8 +179,8 @@ func (c *Client) Models(ctx context.Context) ([]map[string]any, error) {
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
-		text, _ := io.ReadAll(io.LimitReader(res.Body, 512))
-		return nil, fmt.Errorf("上游模型列表返回 %d: %s", res.StatusCode, strings.TrimSpace(string(text)))
+		text, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+		return nil, &UpstreamError{Status: res.StatusCode, RetryAfter: res.Header.Get("Retry-After"), Body: text}
 	}
 	var payload struct {
 		Data []map[string]any `json:"data"`
@@ -162,14 +191,12 @@ func (c *Client) Models(ctx context.Context) ([]map[string]any, error) {
 	models := make([]map[string]any, 0, len(payload.Data))
 	for _, model := range payload.Data {
 		id, _ := model["id"].(string)
-		if id == "big-pickle" || strings.HasSuffix(id, "-free") {
-			models = append(models, map[string]any{
-				"id":       id,
-				"object":   "model",
-				"created":  model["created"],
-				"owned_by": "opencode",
-			})
-		}
+		models = append(models, map[string]any{
+			"id":       id,
+			"object":   "model",
+			"created":  model["created"],
+			"owned_by": "opencode",
+		})
 	}
 	return models, nil
 }
@@ -209,14 +236,12 @@ func SessionID() string {
 	return b.String()
 }
 
-// UpstreamHeaders 复刻官方客户端的请求头。
-func UpstreamHeaders(session string) map[string]string {
-	// 只做免费层：固定使用公共匿名标识。
-	const token = "public"
+// UpstreamHeaders 复刻官方客户端请求头，使用本次请求的调用方凭据。
+func UpstreamHeaders(session, apiKey string) map[string]string {
 	trace, span := randomHex(16), randomHex(8)
 	return map[string]string{
 		"Content-Type":          "application/json",
-		"Authorization":         "Bearer " + token,
+		"Authorization":         "Bearer " + apiKey,
 		"User-Agent":            clientUA,
 		"Accept":                "*/*",
 		"b3":                    trace + "-" + span + "-1-" + randomHex(8),

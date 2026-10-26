@@ -6,7 +6,6 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
-	t.Setenv("API_KEY", "")
 	t.Setenv("DEBUG", "")
 	t.Setenv("PORT", "")
 	t.Setenv("ZEN_API_BASE_URL", "")
@@ -31,7 +30,6 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadFromEnv(t *testing.T) {
-	t.Setenv("API_KEY", "  sk-test  ")
 	t.Setenv("DEBUG", "true")
 	t.Setenv("PORT", "9090")
 	t.Setenv("ZEN_API_BASE_URL", "http://127.0.0.1:2082/")
@@ -40,9 +38,6 @@ func TestLoadFromEnv(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("合法配置不该报错: %v", err)
-	}
-	if cfg.APIKey != "sk-test" {
-		t.Errorf("APIKey = %q, 期望去掉首尾空白", cfg.APIKey)
 	}
 	if !cfg.Debug {
 		t.Error("DEBUG=true 时 Debug 应为 true")

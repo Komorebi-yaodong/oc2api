@@ -29,6 +29,29 @@ func TestURLJoiningWithProxyPrefix(t *testing.T) {
 	}
 }
 
+func TestUpstreamHeadersUseRequestKey(t *testing.T) {
+	headers := UpstreamHeaders("ses_test", "sk-request-user")
+	if headers["Authorization"] != "Bearer sk-request-user" || headers["x-opencode-session"] != "ses_test" {
+		t.Errorf("unexpected request headers: %v", headers)
+	}
+}
+
+func TestInvalidKeyNeverCallsUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("invalid credentials must not reach upstream")
+	}))
+	defer upstream.Close()
+	client := New(config.Config{ZenAPIBaseURL: upstream.URL, ZenConnectTimeout: time.Second})
+	for _, key := range []string{"", "invalid key", "sk-\r\n", "sk-\x7f", "sk-中文"} {
+		if _, err := client.Models(context.Background(), key); err == nil {
+			t.Error("Models accepted an invalid key")
+		}
+		if _, err := client.Chat(context.Background(), []byte(`{}`), "ses_test", key); err == nil {
+			t.Error("Chat accepted an invalid key")
+		}
+	}
+}
+
 // 上游接了连接却迟迟不给响应头时，必须在 ZEN_CONNECT_TIMEOUT_MS 内放弃，
 // 而不是挂到平台上限。这里用“永不回包”的本地上游验证超时真的接上了。
 func TestModelsTimesOutBeforeHeaders(t *testing.T) {
@@ -46,7 +69,7 @@ func TestModelsTimesOutBeforeHeaders(t *testing.T) {
 			client := New(config.Config{ZenAPIBaseURL: upstream.URL, ZenConnectTimeout: timeout})
 
 			started := time.Now()
-			_, err := client.Models(context.Background())
+			_, err := client.Models(context.Background(), "sk-test")
 			elapsed := time.Since(started)
 
 			if err == nil {

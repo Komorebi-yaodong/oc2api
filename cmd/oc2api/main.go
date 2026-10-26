@@ -43,7 +43,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.New(cfg, client, chats),
+		Handler:           httpapi.New(client, chats),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 	log.Printf("oc2api go (http) v%s listening on %s upstream=%s timeout=%s", config.Version, addr, cfg.ZenAPIBaseURL, cfg.ZenConnectTimeout)
